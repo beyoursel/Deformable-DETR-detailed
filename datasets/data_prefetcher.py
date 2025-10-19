@@ -11,7 +11,7 @@ def to_cuda(samples, targets, device):
     targets = [{k: v.to(device, non_blocking=True) for k, v in t.items()} for t in targets]
     return samples, targets
 
-class data_prefetcher():
+class data_prefetcher(): #利用 CUDA stream 异步拷贝数据
     def __init__(self, loader, device, prefetch=True):
         self.loader = iter(loader)
         self.prefetch = prefetch
@@ -50,11 +50,11 @@ class data_prefetcher():
 
     def next(self):
         if self.prefetch:
-            torch.cuda.current_stream().wait_stream(self.stream)
+            torch.cuda.current_stream().wait_stream(self.stream) # 当前main_stream等待self.stream数据搬运完成
             samples = self.next_samples
             targets = self.next_targets
             if samples is not None:
-                samples.record_stream(torch.cuda.current_stream())
+                samples.record_stream(torch.cuda.current_stream()) # 标记 tensor 在主流仍被使用，防止显存提前释放
             if targets is not None:
                 for t in targets:
                     for k, v in t.items():

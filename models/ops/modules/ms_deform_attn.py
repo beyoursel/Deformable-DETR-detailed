@@ -52,22 +52,22 @@ class MSDeformAttn(nn.Module):
         self.n_heads = n_heads
         self.n_points = n_points
 
-        self.sampling_offsets = nn.Linear(d_model, n_heads * n_levels * n_points * 2)
-        self.attention_weights = nn.Linear(d_model, n_heads * n_levels * n_points)
-        self.value_proj = nn.Linear(d_model, d_model)
-        self.output_proj = nn.Linear(d_model, d_model)
+        self.sampling_offsets = nn.Linear(d_model, n_heads * n_levels * n_points * 2) # （256， 8*4*4*2）预测的采样点偏移，每个点有x,y两个方向的偏移量
+        self.attention_weights = nn.Linear(d_model, n_heads * n_levels * n_points) # attention，直接用网络预测，(256, 8*4*4)
+        self.value_proj = nn.Linear(d_model, d_model) # (256,256)
+        self.output_proj = nn.Linear(d_model, d_model) # (256,256)
 
-        self._reset_parameters()
+        self._reset_parameters() # 注意sampling_offsets.bias
 
     def _reset_parameters(self):
         constant_(self.sampling_offsets.weight.data, 0.)
         thetas = torch.arange(self.n_heads, dtype=torch.float32) * (2.0 * math.pi / self.n_heads)
-        grid_init = torch.stack([thetas.cos(), thetas.sin()], -1)
-        grid_init = (grid_init / grid_init.abs().max(-1, keepdim=True)[0]).view(self.n_heads, 1, 1, 2).repeat(1, self.n_levels, self.n_points, 1)
+        grid_init = torch.stack([thetas.cos(), thetas.sin()], -1) #（8，2）
+        grid_init = (grid_init / grid_init.abs().max(-1, keepdim=True)[0]).view(self.n_heads, 1, 1, 2).repeat(1, self.n_levels, self.n_points, 1) # 使得每一行坐标最大值为1，最终shape为(8, 4, 4, 2)
         for i in range(self.n_points):
-            grid_init[:, :, i, :] *= i + 1
-        with torch.no_grad():
-            self.sampling_offsets.bias = nn.Parameter(grid_init.view(-1))
+            grid_init[:, :, i, :] *= i + 1 # 逐步扩大不同采样点的位置，使得采样点在空间上更离散
+        with torch.no_grad(): # 下面的操作不会影响梯度
+            self.sampling_offsets.bias = nn.Parameter(grid_init.view(-1)) # 采样偏移使用cos/sin初始化，上述操作应该是遵循可变形卷即的初始化逻辑
         constant_(self.attention_weights.weight.data, 0.)
         constant_(self.attention_weights.bias.data, 0.)
         xavier_uniform_(self.value_proj.weight.data)
@@ -91,18 +91,18 @@ class MSDeformAttn(nn.Module):
         N, Len_in, _ = input_flatten.shape
         assert (input_spatial_shapes[:, 0] * input_spatial_shapes[:, 1]).sum() == Len_in
 
-        value = self.value_proj(input_flatten)
+        value = self.value_proj(input_flatten) # src2value_proj [1, 8160, 256]
         if input_padding_mask is not None:
-            value = value.masked_fill(input_padding_mask[..., None], float(0))
-        value = value.view(N, Len_in, self.n_heads, self.d_model // self.n_heads)
-        sampling_offsets = self.sampling_offsets(query).view(N, Len_q, self.n_heads, self.n_levels, self.n_points, 2)
-        attention_weights = self.attention_weights(query).view(N, Len_q, self.n_heads, self.n_levels * self.n_points)
-        attention_weights = F.softmax(attention_weights, -1).view(N, Len_q, self.n_heads, self.n_levels, self.n_points)
+            value = value.masked_fill(input_padding_mask[..., None], float(0)) # 在无效的地方padding 0
+        value = value.view(N, Len_in, self.n_heads, self.d_model // self.n_heads) # [1, 8160, 8, 32]
+        sampling_offsets = self.sampling_offsets(query).view(N, Len_q, self.n_heads, self.n_levels, self.n_points, 2) # 基于query预测offsets, shape: [1, 8160, 8, 4, 4, 2]
+        attention_weights = self.attention_weights(query).view(N, Len_q, self.n_heads, self.n_levels * self.n_points) # [1, 8160, 8, 4*4] attention weights由query直接预测
+        attention_weights = F.softmax(attention_weights, -1).view(N, Len_q, self.n_heads, self.n_levels, self.n_points) # n_levels和n_points的attention权重和为1
         # N, Len_q, n_heads, n_levels, n_points, 2
-        if reference_points.shape[-1] == 2:
-            offset_normalizer = torch.stack([input_spatial_shapes[..., 1], input_spatial_shapes[..., 0]], -1)
+        if reference_points.shape[-1] == 2: # reference_points[x, y] -> (W, H)
+            offset_normalizer = torch.stack([input_spatial_shapes[..., 1], input_spatial_shapes[..., 0]], -1) # H, W to W, H
             sampling_locations = reference_points[:, :, None, :, None, :] \
-                                 + sampling_offsets / offset_normalizer[None, None, None, :, None, :]
+                                 + sampling_offsets / offset_normalizer[None, None, None, :, None, :] # offset_normalizer [W, H],这里预测的sample_off_set是相对偏移
         elif reference_points.shape[-1] == 4:
             sampling_locations = reference_points[:, :, None, :, None, :2] \
                                  + sampling_offsets / self.n_points * reference_points[:, :, None, :, None, 2:] * 0.5
@@ -110,6 +110,6 @@ class MSDeformAttn(nn.Module):
             raise ValueError(
                 'Last dim of reference_points must be 2 or 4, but get {} instead.'.format(reference_points.shape[-1]))
         output = MSDeformAttnFunction.apply(
-            value, input_spatial_shapes, input_level_start_index, sampling_locations, attention_weights, self.im2col_step)
+            value, input_spatial_shapes, input_level_start_index, sampling_locations, attention_weights, self.im2col_step) # [1, 8160, 256]
         output = self.output_proj(output)
         return output

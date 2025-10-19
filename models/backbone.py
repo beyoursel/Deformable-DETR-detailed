@@ -119,7 +119,7 @@ class Joiner(nn.Sequential):
         xs = self[0](tensor_list)
         out: List[NestedTensor] = []
         pos = []
-        for name, x in sorted(xs.items()):
+        for name, x in sorted(xs.items()): # 按key排序依次取出
             out.append(x)
 
         # position encoding

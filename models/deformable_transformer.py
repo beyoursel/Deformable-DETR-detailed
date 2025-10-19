@@ -36,14 +36,14 @@ class DeformableTransformer(nn.Module):
         encoder_layer = DeformableTransformerEncoderLayer(d_model, dim_feedforward,
                                                           dropout, activation,
                                                           num_feature_levels, nhead, enc_n_points)
-        self.encoder = DeformableTransformerEncoder(encoder_layer, num_encoder_layers)
+        self.encoder = DeformableTransformerEncoder(encoder_layer, num_encoder_layers) # num_encoder_layers： 6
 
         decoder_layer = DeformableTransformerDecoderLayer(d_model, dim_feedforward,
                                                           dropout, activation,
                                                           num_feature_levels, nhead, dec_n_points)
         self.decoder = DeformableTransformerDecoder(decoder_layer, num_decoder_layers, return_intermediate_dec)
 
-        self.level_embed = nn.Parameter(torch.Tensor(num_feature_levels, d_model))
+        self.level_embed = nn.Parameter(torch.Tensor(num_feature_levels, d_model)) # 可学习参数，用来标识不同level的feature map
 
         if two_stage:
             self.enc_output = nn.Linear(d_model, d_model)
@@ -51,7 +51,7 @@ class DeformableTransformer(nn.Module):
             self.pos_trans = nn.Linear(d_model * 2, d_model * 2)
             self.pos_trans_norm = nn.LayerNorm(d_model * 2)
         else:
-            self.reference_points = nn.Linear(d_model, 2)
+            self.reference_points = nn.Linear(d_model, 2) # [256,2]， 用于由query_embeded得到reference point
 
         self._reset_parameters()
 
@@ -61,7 +61,7 @@ class DeformableTransformer(nn.Module):
                 nn.init.xavier_uniform_(p)
         for m in self.modules():
             if isinstance(m, MSDeformAttn):
-                m._reset_parameters()
+                m._reset_parameters() # 使用MSDeformAttn自定义的初始化方式
         if not self.two_stage:
             xavier_uniform_(self.reference_points.weight.data, gain=1.0)
             constant_(self.reference_points.bias.data, 0.)
@@ -138,18 +138,18 @@ class DeformableTransformer(nn.Module):
             src = src.flatten(2).transpose(1, 2)
             mask = mask.flatten(1)
             pos_embed = pos_embed.flatten(2).transpose(1, 2)
-            lvl_pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)
+            lvl_pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1) # 给每个level增加level_embed标识进行区分
             lvl_pos_embed_flatten.append(lvl_pos_embed)
             src_flatten.append(src)
             mask_flatten.append(mask)
-        src_flatten = torch.cat(src_flatten, 1)
+        src_flatten = torch.cat(src_flatten, 1) # 将所有feature level concat
         mask_flatten = torch.cat(mask_flatten, 1)
         lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1)
         spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=src_flatten.device)
         level_start_index = torch.cat((spatial_shapes.new_zeros((1, )), spatial_shapes.prod(1).cumsum(0)[:-1]))
         valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks], 1)
-
-        # encoder
+        
+        # encoder 
         memory = self.encoder(src_flatten, spatial_shapes, level_start_index, valid_ratios, lvl_pos_embed_flatten, mask_flatten)
 
         # prepare input for decoder
@@ -172,8 +172,8 @@ class DeformableTransformer(nn.Module):
         else:
             query_embed, tgt = torch.split(query_embed, c, dim=1)
             query_embed = query_embed.unsqueeze(0).expand(bs, -1, -1)
-            tgt = tgt.unsqueeze(0).expand(bs, -1, -1)
-            reference_points = self.reference_points(query_embed).sigmoid()
+            tgt = tgt.unsqueeze(0).expand(bs, -1, -1) # object query
+            reference_points = self.reference_points(query_embed).sigmoid() # limit to [0, 1], query_embed通过全连接层生成2d reference points 
             init_reference_out = reference_points
 
         # decoder
@@ -218,7 +218,7 @@ class DeformableTransformerEncoderLayer(nn.Module):
 
     def forward(self, src, pos, reference_points, spatial_shapes, level_start_index, padding_mask=None):
         # self attention
-        src2 = self.self_attn(self.with_pos_embed(src, pos), reference_points, src, spatial_shapes, level_start_index, padding_mask)
+        src2 = self.self_attn(self.with_pos_embed(src, pos), reference_points, src, spatial_shapes, level_start_index, padding_mask) # refe_p:[1, 8160, 4, 2]
         src = src + self.dropout1(src2)
         src = self.norm1(src)
 
@@ -241,7 +241,7 @@ class DeformableTransformerEncoder(nn.Module):
 
             ref_y, ref_x = torch.meshgrid(torch.linspace(0.5, H_ - 0.5, H_, dtype=torch.float32, device=device),
                                           torch.linspace(0.5, W_ - 0.5, W_, dtype=torch.float32, device=device))
-            ref_y = ref_y.reshape(-1)[None] / (valid_ratios[:, None, lvl, 1] * H_)
+            ref_y = ref_y.reshape(-1)[None] / (valid_ratios[:, None, lvl, 1] * H_) # 对ref_points坐标进行归一化
             ref_x = ref_x.reshape(-1)[None] / (valid_ratios[:, None, lvl, 0] * W_)
             ref = torch.stack((ref_x, ref_y), -1)
             reference_points_list.append(ref)
@@ -250,8 +250,8 @@ class DeformableTransformerEncoder(nn.Module):
         return reference_points
 
     def forward(self, src, spatial_shapes, level_start_index, valid_ratios, pos=None, padding_mask=None):
-        output = src
-        reference_points = self.get_reference_points(spatial_shapes, valid_ratios, device=src.device)
+        output = src # 所有feature map特征flatten之后concat
+        reference_points = self.get_reference_points(spatial_shapes, valid_ratios, device=src.device) # 计算参考点，feature map上每个位置就是参考点，按照x,y-W,H的顺序
         for _, layer in enumerate(self.layers):
             output = layer(output, pos, reference_points, spatial_shapes, level_start_index, padding_mask)
 
@@ -265,12 +265,12 @@ class DeformableTransformerDecoderLayer(nn.Module):
         super().__init__()
 
         # cross attention
-        self.cross_attn = MSDeformAttn(d_model, n_levels, n_heads, n_points)
+        self.cross_attn = MSDeformAttn(d_model, n_levels, n_heads, n_points) # 这里采用deformable attention
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(d_model)
 
         # self attention
-        self.self_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout)
+        self.self_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout) # 这里使用常规的self-attetion
         self.dropout2 = nn.Dropout(dropout)
         self.norm2 = nn.LayerNorm(d_model)
 
@@ -294,7 +294,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
 
     def forward(self, tgt, query_pos, reference_points, src, src_spatial_shapes, level_start_index, src_padding_mask=None):
         # self attention
-        q = k = self.with_pos_embed(tgt, query_pos)
+        q = k = self.with_pos_embed(tgt, query_pos) # q和k增加PE
         tgt2 = self.self_attn(q.transpose(0, 1), k.transpose(0, 1), tgt.transpose(0, 1))[0].transpose(0, 1)
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
@@ -302,7 +302,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
         # cross attention
         tgt2 = self.cross_attn(self.with_pos_embed(tgt, query_pos),
                                reference_points,
-                               src, src_spatial_shapes, level_start_index, src_padding_mask)
+                               src, src_spatial_shapes, level_start_index, src_padding_mask) # query_pos可学习PE，decoder过程中公用，refence_points也是公用
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
 

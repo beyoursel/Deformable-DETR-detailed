@@ -52,24 +52,24 @@ class DeformableDETR(nn.Module):
         self.transformer = transformer
         hidden_dim = transformer.d_model
         self.class_embed = nn.Linear(hidden_dim, num_classes)
-        self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
+        self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3) # 输出维度4，3层linear layer
         self.num_feature_levels = num_feature_levels
         if not two_stage:
-            self.query_embed = nn.Embedding(num_queries, hidden_dim*2)
+            self.query_embed = nn.Embedding(num_queries, hidden_dim*2) # (300,256*2)
         if num_feature_levels > 1:
-            num_backbone_outs = len(backbone.strides)
+            num_backbone_outs = len(backbone.strides) # 3
             input_proj_list = []
             for _ in range(num_backbone_outs):
                 in_channels = backbone.num_channels[_]
                 input_proj_list.append(nn.Sequential(
                     nn.Conv2d(in_channels, hidden_dim, kernel_size=1),
-                    nn.GroupNorm(32, hidden_dim),
-                ))
+                    nn.GroupNorm(32, hidden_dim), # 提供模型稳定性，加速训练，适合小batch_size
+                )) # 将feature map特征通道数转换为hidden_dim=256
             for _ in range(num_feature_levels - num_backbone_outs):
                 input_proj_list.append(nn.Sequential(
                     nn.Conv2d(in_channels, hidden_dim, kernel_size=3, stride=2, padding=1),
                     nn.GroupNorm(32, hidden_dim),
-                ))
+                )) # 在backbone输出feature_map数量的基础上增加一个
                 in_channels = hidden_dim
             self.input_proj = nn.ModuleList(input_proj_list)
         else:
@@ -85,10 +85,10 @@ class DeformableDETR(nn.Module):
 
         prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
-        self.class_embed.bias.data = torch.ones(num_classes) * bias_value
+        self.class_embed.bias.data = torch.ones(num_classes) * bias_value # 使得模型开始预测时概率值大概为0.01，使得网络在训练初期不至于预测太多FP
         nn.init.constant_(self.bbox_embed.layers[-1].weight.data, 0)
         nn.init.constant_(self.bbox_embed.layers[-1].bias.data, 0)
-        for proj in self.input_proj:
+        for proj in self.input_proj: # input_proj用来转换feature map
             nn.init.xavier_uniform_(proj[0].weight, gain=1)
             nn.init.constant_(proj[0].bias, 0)
 
@@ -128,11 +128,11 @@ class DeformableDETR(nn.Module):
         """
         if not isinstance(samples, NestedTensor):
             samples = nested_tensor_from_tensor_list(samples)
-        features, pos = self.backbone(samples)
+        features, pos = self.backbone(samples) # [batch_size, 3, 512, 767]
 
         srcs = []
         masks = []
-        for l, feat in enumerate(features):
+        for l, feat in enumerate(features): # 将feature map映射到相同维度256
             src, mask = feat.decompose()
             srcs.append(self.input_proj[l](src))
             masks.append(mask)
@@ -141,19 +141,19 @@ class DeformableDETR(nn.Module):
             _len_srcs = len(srcs)
             for l in range(_len_srcs, self.num_feature_levels):
                 if l == _len_srcs:
-                    src = self.input_proj[l](features[-1].tensors)
+                    src = self.input_proj[l](features[-1].tensors) # 对backbone输出的最后一层feature进行2x下采样
                 else:
                     src = self.input_proj[l](srcs[-1])
                 m = samples.mask
-                mask = F.interpolate(m[None].float(), size=src.shape[-2:]).to(torch.bool)[0]
-                pos_l = self.backbone[1](NestedTensor(src, mask)).to(src.dtype)
+                mask = F.interpolate(m[None].float(), size=src.shape[-2:]).to(torch.bool)[0] # 这里[0]是为了去掉m[None]增加的维度
+                pos_l = self.backbone[1](NestedTensor(src, mask)).to(src.dtype) # 生成PE
                 srcs.append(src)
                 masks.append(mask)
                 pos.append(pos_l)
 
         query_embeds = None
         if not self.two_stage:
-            query_embeds = self.query_embed.weight
+            query_embeds = self.query_embed.weight # 对query_embed_weight参数引用，参与梯度更新
         hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact = self.transformer(srcs, masks, pos, query_embeds)
 
         outputs_classes = []
@@ -170,14 +170,14 @@ class DeformableDETR(nn.Module):
                 tmp += reference
             else:
                 assert reference.shape[-1] == 2
-                tmp[..., :2] += reference
-            outputs_coord = tmp.sigmoid()
+                tmp[..., :2] += reference # 在reference的基础上加上预测的box offset
+            outputs_coord = tmp.sigmoid() # 归一化
             outputs_classes.append(outputs_class)
             outputs_coords.append(outputs_coord)
         outputs_class = torch.stack(outputs_classes)
         outputs_coord = torch.stack(outputs_coords)
 
-        out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
+        out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]} # decoder最后一层的输出
         if self.aux_loss:
             out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord)
 
@@ -192,7 +192,7 @@ class DeformableDETR(nn.Module):
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
         return [{'pred_logits': a, 'pred_boxes': b}
-                for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
+                for a, b in zip(outputs_class[:-1], outputs_coord[:-1])] # except for the latest layer of decoder
 
 
 class SetCriterion(nn.Module):
@@ -235,7 +235,7 @@ class SetCriterion(nn.Module):
         target_classes_onehot.scatter_(2, target_classes.unsqueeze(-1), 1)
 
         target_classes_onehot = target_classes_onehot[:,:,:-1]
-        loss_ce = sigmoid_focal_loss(src_logits, target_classes_onehot, num_boxes, alpha=self.focal_alpha, gamma=2) * src_logits.shape[1]
+        loss_ce = sigmoid_focal_loss(src_logits, target_classes_onehot, num_boxes, alpha=self.focal_alpha, gamma=2) * src_logits.shape[1] # 采用BCE+focal loss
         losses = {'loss_ce': loss_ce}
 
         if log:

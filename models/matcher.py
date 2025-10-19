@@ -78,7 +78,7 @@ class HungarianMatcher(nn.Module):
             gamma = 2.0
             neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
             pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())
-            cost_class = pos_cost_class[:, tgt_ids] - neg_cost_class[:, tgt_ids]
+            cost_class = pos_cost_class[:, tgt_ids] - neg_cost_class[:, tgt_ids] # 使用focal loss替换DETR的对类别置信度直接取负
 
             # Compute the L1 cost between boxes
             cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
@@ -92,7 +92,7 @@ class HungarianMatcher(nn.Module):
             C = C.view(bs, num_queries, -1).cpu()
 
             sizes = [len(v["boxes"]) for v in targets]
-            indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
+            indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))] # 对每帧单独hungarian match
             return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
 
 

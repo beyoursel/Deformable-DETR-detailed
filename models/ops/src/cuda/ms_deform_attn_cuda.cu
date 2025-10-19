@@ -18,12 +18,12 @@
 
 
 at::Tensor ms_deform_attn_cuda_forward(
-    const at::Tensor &value, 
-    const at::Tensor &spatial_shapes,
-    const at::Tensor &level_start_index,
-    const at::Tensor &sampling_loc,
-    const at::Tensor &attn_weight,
-    const int im2col_step)
+    const at::Tensor &value, // [1, 8160, 8, 32]
+    const at::Tensor &spatial_shapes, // [4, 2] H,W 
+    const at::Tensor &level_start_index, // [0, 6144, 7680, 8064]
+    const at::Tensor &sampling_loc, // [1, 8160, 8, 4, 4, 2]
+    const at::Tensor &attn_weight, // [1, 8160, 8, 4, 4]
+    const int im2col_step) // 64
 {
     AT_ASSERTM(value.is_contiguous(), "value tensor has to be contiguous");
     AT_ASSERTM(spatial_shapes.is_contiguous(), "spatial_shapes tensor has to be contiguous");
@@ -37,17 +37,17 @@ at::Tensor ms_deform_attn_cuda_forward(
     AT_ASSERTM(sampling_loc.type().is_cuda(), "sampling_loc must be a CUDA tensor");
     AT_ASSERTM(attn_weight.type().is_cuda(), "attn_weight must be a CUDA tensor");
 
-    const int batch = value.size(0);
-    const int spatial_size = value.size(1);
-    const int num_heads = value.size(2);
-    const int channels = value.size(3);
+    const int batch = value.size(0); // 1
+    const int spatial_size = value.size(1); // 8160， all feature points of all level
+    const int num_heads = value.size(2); // 8
+    const int channels = value.size(3); // 32
 
-    const int num_levels = spatial_shapes.size(0);
+    const int num_levels = spatial_shapes.size(0); // 4
 
-    const int num_query = sampling_loc.size(1);
-    const int num_point = sampling_loc.size(4);
+    const int num_query = sampling_loc.size(1); // 8160
+    const int num_point = sampling_loc.size(4); // 4 one query match four key point
 
-    const int im2col_step_ = std::min(batch, im2col_step);
+    const int im2col_step_ = std::min(batch, im2col_step); // min(1, 64) -> 1
 
     AT_ASSERTM(batch % im2col_step_ == 0, "batch(%d) must divide im2col_step(%d)", batch, im2col_step_);
     
